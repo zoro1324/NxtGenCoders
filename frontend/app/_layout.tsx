@@ -8,6 +8,8 @@ export default function RootLayout() {
       <ThemeProvider>
         <Stack>
           <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+          <Stack.Screen name="signup" options={{ title: "Create Account" }} />
+          <Stack.Screen name="login" options={{ title: "Log In" }} />
         </Stack>
       </ThemeProvider>
     </SafeAreaProvider>

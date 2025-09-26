@@ -1,6 +1,6 @@
 import { Image } from "expo-image";
-import { Link } from "expo-router";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useRouter } from "expo-router";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ScrollView,
   RefreshControl,
@@ -8,10 +8,10 @@ import {
   Text,
   View,
   TouchableOpacity,
-  useColorScheme,
   Platform,
   Linking,
   Alert,
+  
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import Constants from "expo-constants";
@@ -33,10 +33,147 @@ type Report = {
   shares: number;
   created_at?: string;
   coords?: { lat: number; lng: number };
+  voice_url?: string | null;
 };
 
 export default function HomeScreen() {
+  const router = useRouter();
   const { isDark } = useAppTheme();
+  // simple audio playback per card
+  const soundRef = useRef<any>(null);
+  const [currentVoice, setCurrentVoice] = useState<string | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isLoadingSound, setIsLoadingSound] = useState(false);
+  const [positionMs, setPositionMs] = useState(0);
+  const [durationMs, setDurationMs] = useState(0);
+  const [progressWidth, setProgressWidth] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragMs, setDragMs] = useState(0);
+  const formatMs = (ms: number) => {
+    const sec = Math.max(0, Math.floor(ms / 1000));
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}:${String(s).padStart(2, "0")}`;
+  };
+  const togglePlay = useCallback(async (uri: string) => {
+    try {
+      const { Audio } = await import("expo-av");
+      // Ensure the right audio mode for audible playback
+      try {
+        await Audio.setAudioModeAsync({
+          playsInSilentModeIOS: true,
+          shouldDuckAndroid: true,
+          playThroughEarpieceAndroid: false,
+          staysActiveInBackground: false,
+        });
+      } catch {}
+      // If tapping the same post, toggle pause/resume
+      if (currentVoice && soundRef.current && currentVoice === uri) {
+        const status = await soundRef.current.getStatusAsync();
+        if (status?.isLoaded) {
+          if (status.isPlaying) {
+            await soundRef.current.pauseAsync();
+            setIsPlaying(false);
+          } else {
+            await soundRef.current.playAsync();
+            setIsPlaying(true);
+          }
+          return;
+        }
+      }
+      // New selection: unload previous and play this one
+      setIsLoadingSound(true);
+      if (soundRef.current) {
+        try { await soundRef.current.unloadAsync(); } catch {}
+        soundRef.current = null;
+      }
+      const { sound } = await Audio.Sound.createAsync(
+        { uri },
+        { shouldPlay: true, progressUpdateIntervalMillis: 250, isMuted: false, volume: 1.0 }
+      );
+      soundRef.current = sound;
+      setCurrentVoice(uri);
+      setIsPlaying(true);
+      try { await sound.setVolumeAsync(1.0); } catch {}
+      sound.setOnPlaybackStatusUpdate((s: any) => {
+        if (!s?.isLoaded) return;
+        if (typeof s.positionMillis === 'number') setPositionMs(s.positionMillis);
+        if (typeof s.durationMillis === 'number') setDurationMs(s.durationMillis);
+        if (s.didJustFinish) {
+          setIsPlaying(false);
+          setCurrentVoice(null);
+          try { sound.unloadAsync(); } catch {}
+          soundRef.current = null;
+          setPositionMs(0);
+          setDurationMs(0);
+        } else {
+          setIsPlaying(!!s.isPlaying);
+        }
+      });
+    } catch (e) {
+      Alert.alert("Playback failed", (e as any)?.message ?? "");
+    }
+    finally {
+      setIsLoadingSound(false);
+    }
+  }, [currentVoice]);
+  const clamp = (n: number, min = 0, max = 1) => Math.min(max, Math.max(min, n));
+  const percent = (ms: number, total: number) => (total > 0 ? clamp(ms / total, 0, 1) * 100 : 0);
+  const onScrubGrant = useCallback((x: number) => {
+    if (!durationMs) return;
+    setIsDragging(true);
+    const frac = clamp(x / Math.max(1, progressWidth));
+    setDragMs(Math.floor(frac * durationMs));
+  }, [durationMs, progressWidth]);
+  const onScrubMove = useCallback((x: number) => {
+    if (!durationMs) return;
+    const frac = clamp(x / Math.max(1, progressWidth));
+    setDragMs(Math.floor(frac * durationMs));
+  }, [durationMs, progressWidth]);
+  const onScrubRelease = useCallback(async (x?: number) => {
+    try {
+      if (!soundRef.current || !currentVoice || !durationMs) { setIsDragging(false); return; }
+      let target = dragMs;
+      if (typeof x === 'number') {
+        const frac = clamp(x / Math.max(1, progressWidth));
+        target = Math.floor(frac * durationMs);
+        setDragMs(target);
+      }
+      const status = await soundRef.current.getStatusAsync();
+      if (status?.isLoaded) {
+        if (status.isPlaying) await soundRef.current.playFromPositionAsync(target);
+        else await soundRef.current.setPositionAsync(target);
+        setPositionMs(target);
+      }
+    } catch {}
+    finally {
+      setIsDragging(false);
+    }
+  }, [dragMs, durationMs, progressWidth, currentVoice]);
+  useEffect(() => {
+    // Set a global audio mode once on mount to maximize audibility
+    (async () => {
+      try {
+        const { Audio } = await import("expo-av");
+        await Audio.setAudioModeAsync({
+          playsInSilentModeIOS: true,
+          shouldDuckAndroid: true,
+          playThroughEarpieceAndroid: false, // use loudspeaker
+          staysActiveInBackground: false,
+        });
+      } catch {}
+    })();
+    return () => {
+      (async () => {
+        try {
+          if (soundRef.current) {
+            await soundRef.current.unloadAsync();
+            soundRef.current = null;
+          }
+        } catch {}
+      })();
+    };
+  }, []);
   const insets = useSafeAreaInsets();
   const [reports, setReports] = useState<Report[]>([]);
   const [loading, setLoading] = useState(true);
@@ -50,25 +187,39 @@ export default function HomeScreen() {
     const publicEnv = (typeof process !== "undefined" && (process as any)?.env?.EXPO_PUBLIC_API_URL)
       ? (process as any).env.EXPO_PUBLIC_API_URL as string
       : undefined;
-    if (publicEnv) return [publicEnv.replace(/\/$/, "")];
+    if (publicEnv) list.push(publicEnv.replace(/\/$/, ""));
 
     const hostUri: string | undefined = (Constants as any)?.expoConfig?.hostUri || (Constants as any)?.debuggerHost;
     const host = typeof hostUri === "string" ? hostUri.split(":" )[0] : undefined;
     const isIPv4 = host ? /^\d+\.\d+\.\d+\.\d+$/.test(host) : false;
 
     if (Platform.OS === "android") {
-      // Prefer emulator alias first
+      // Emulator alias
       list.push("http://10.0.2.2:8000");
       if (isIPv4) list.push(`http://${host}:8000`);
+      // Fallback to loopback
       list.push("http://127.0.0.1:8000");
     } else {
       if (isIPv4) list.push(`http://${host}:8000`);
       list.push("http://127.0.0.1:8000");
     }
-    return list;
+    // Deduplicate while preserving order
+    return Array.from(new Set(list));
   }, []);
 
   const fetchReports = useCallback(async (showSpinner: boolean) => {
+    const fetchWithTimeout = async (url: string, ms = 5000) => {
+      const controller = typeof AbortController !== 'undefined' ? new AbortController() : (null as any);
+      const timer = setTimeout(() => {
+        try { controller?.abort(); } catch {}
+      }, ms);
+      try {
+        const res = await fetch(url, controller ? { signal: controller.signal } : undefined);
+        return res;
+      } finally {
+        clearTimeout(timer);
+      }
+    };
     let cancelled = false;
     try {
       if (showSpinner) setLoading(true);
@@ -79,7 +230,7 @@ export default function HomeScreen() {
         attempts.push(base);
         try {
           const url = `${base}/api/reports/`;
-          const res = await fetch(url);
+          const res = await fetchWithTimeout(url, 5000);
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const data = await res.json();
           const items: Report[] = (data.results ?? data) as Report[];
@@ -176,14 +327,7 @@ export default function HomeScreen() {
         <View>
           <Text style={[styles.appTitle, isDark && { color: "#A5D6FF" }]}>Smart City</Text>
         </View>
-        <TouchableOpacity style={styles.avatarWrap} activeOpacity={0.8}>
-          <Image
-            source={{
-              uri: "https://images.unsplash.com/photo-1519345182560-3f2917c472ef?q=80&w=400&auto=format&fit=crop",
-            }}
-            style={styles.avatar}
-          />
-        </TouchableOpacity>
+        <AuthHeaderRight onPressAvatar={() => router.push('/settings') } onPressLogin={() => router.push('/login')} />
       </LinearGradient>
 
       <View style={styles.actions}>
@@ -248,6 +392,46 @@ export default function HomeScreen() {
             <Text style={[styles.cardTitle, isDark && { color: "#E6EAF2" }]}>{r.title}</Text>
             {!!(r.photo || r.image_url) && <Image source={{ uri: r.photo || r.image_url! }} style={styles.cardImage} contentFit="cover" />}
             {!!r.body && <Text style={[styles.cardBody, isDark && { color: "#C9D2DC" }]}>{r.body}</Text>}
+            {!!r.voice_url && (
+              <View style={styles.voiceRow}>
+                <TouchableOpacity
+                  style={[styles.voiceBtn, (currentVoice === r.voice_url && isPlaying) && styles.voiceBtnActive]}
+                  activeOpacity={0.85}
+                  disabled={isLoadingSound && currentVoice === r.voice_url}
+                  onPress={() => togglePlay(r.voice_url!)}
+                >
+                  <Ionicons
+                    name={currentVoice === r.voice_url && isPlaying ? "pause-circle-outline" : "play-circle-outline"}
+                    size={18}
+                    color="#fff"
+                  />
+                  <Text style={styles.voiceBtnText}>
+                    {currentVoice === r.voice_url && isPlaying ? "Pause voice" : (isLoadingSound && currentVoice === r.voice_url) ? "Loading…" : "Play voice"}
+                  </Text>
+                </TouchableOpacity>
+                {currentVoice === r.voice_url && (
+                    <View style={styles.voiceMeta}>
+                    <View
+                      onLayout={(e) => setProgressWidth(e.nativeEvent.layout.width)}
+                      onStartShouldSetResponder={() => true}
+                      onMoveShouldSetResponder={() => true}
+                      onStartShouldSetResponderCapture={() => true}
+                      onMoveShouldSetResponderCapture={() => true}
+                      onResponderTerminationRequest={() => false}
+                      onResponderGrant={(e) => onScrubGrant((e as any).nativeEvent.locationX)}
+                      onResponderMove={(e) => onScrubMove((e as any).nativeEvent.locationX)}
+                      onResponderRelease={(e) => onScrubRelease((e as any).nativeEvent.locationX)}
+                      onResponderTerminate={() => setIsDragging(false)}
+                      style={styles.progressTrack}
+                    >
+                      <View style={[styles.progressBar, { width: `${percent(isDragging ? dragMs : positionMs, durationMs)}%` }]} />
+                      <View style={[styles.progressThumb, { left: `${percent(isDragging ? dragMs : positionMs, durationMs)}%` }]} />
+                    </View>
+                    <Text style={styles.voiceTimeText}>{formatMs(positionMs)} / {formatMs(durationMs)}</Text>
+                  </View>
+                )}
+              </View>
+            )}
 
             <View style={styles.cardFooter}>
               <TouchableOpacity style={styles.footerItem} activeOpacity={0.7}>
@@ -272,6 +456,62 @@ export default function HomeScreen() {
       </View>
     </ScrollView>
   );
+}
+
+function AuthHeaderRight({ onPressAvatar, onPressLogin }: { onPressAvatar: () => void; onPressLogin: () => void }) {
+  const [avatar, setAvatar] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const inited = useRef(false);
+  useEffect(() => {
+    if (inited.current) return; inited.current = true;
+    (async () => {
+      try {
+        const { default: SecureStore } = await import('expo-secure-store');
+        const token = await SecureStore.getItemAsync('auth_token');
+        const profileRaw = await SecureStore.getItemAsync('auth_profile');
+        let p: any = null; try { p = profileRaw ? JSON.parse(profileRaw) : null; } catch {}
+        let avatarUrl: string | null = p?.avatar ?? null;
+        if (token) {
+          // refresh profile
+          const base = await pickBase();
+          const res = await fetch(`${base}/api/auth/me/`, { headers: { 'Authorization': `Token ${token}` } });
+          if (res.ok) {
+            const me = await res.json();
+            avatarUrl = me?.avatar ?? avatarUrl;
+            await SecureStore.setItemAsync('auth_profile', JSON.stringify(me));
+          }
+        }
+        setAvatar(avatarUrl);
+      } catch {}
+      finally { setLoading(false); }
+    })();
+  }, []);
+  if (loading) return <View style={styles.avatarWrap} />;
+  if (avatar) {
+    return (
+      <TouchableOpacity style={styles.avatarWrap} activeOpacity={0.8} onPress={onPressAvatar}>
+        <Image source={{ uri: avatar }} style={styles.avatar} />
+      </TouchableOpacity>
+    );
+  }
+  return (
+    <TouchableOpacity onPress={onPressLogin} style={{ paddingHorizontal: 10, paddingVertical: 6, borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 10 }}>
+      <Text style={{ color: '#0A66C2', fontWeight: '800' }}>Sign In</Text>
+    </TouchableOpacity>
+  );
+}
+
+async function pickBase(): Promise<string> {
+  const list: string[] = [];
+  const env = (process as any)?.env?.EXPO_PUBLIC_API_URL as string | undefined;
+  if (env) list.push(env.replace(/\/$/, ""));
+  const { default: ConstantsLocal } = await import('expo-constants');
+  const hostUri: string | undefined = (ConstantsLocal as any)?.expoConfig?.hostUri || (ConstantsLocal as any)?.debuggerHost;
+  const host = typeof hostUri === "string" ? hostUri.split(":")[0] : undefined;
+  const isIPv4 = host ? /^\d+\.\d+\.\d+\.\d+$/.test(host) : false;
+  if (Platform.OS === "android") { list.push("http://10.0.2.2:8000"); if (isIPv4) list.push(`http://${host}:8000`); list.push("http://127.0.0.1:8000"); }
+  else { if (isIPv4) list.push(`http://${host}:8000`); list.push("http://127.0.0.1:8000"); }
+  return Array.from(new Set(list))[0];
 }
 
 const styles = StyleSheet.create({
@@ -345,4 +585,45 @@ const styles = StyleSheet.create({
   },
   footerItem: { flexDirection: "row", alignItems: "center", gap: 6 },
   footerText: { color: "#6B7280", fontWeight: "600" },
+  voiceRow: { marginTop: 8, flexDirection: "row", alignItems: "center" },
+  voiceBtn: {
+    backgroundColor: "#2563EB",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    alignSelf: "flex-start",
+  },
+  voiceBtnActive: { backgroundColor: "#1D4ED8" },
+  voiceBtnText: { color: "#fff", fontWeight: "800" },
+  voiceMeta: { marginLeft: 12, flex: 1 },
+  progressTrack: {
+    height: 24,
+    backgroundColor: "#E5E7EB",
+    borderRadius: 12,
+    // Make drag easier and keep thumb visible
+    justifyContent: 'center',
+  },
+  progressBar: { height: 4, backgroundColor: "#2563EB", borderRadius: 2 },
+  progressThumb: {
+    position: 'absolute',
+    // Center the 16px thumb inside 24px-high track
+    top: 4,
+    width: 16,
+    height: 16,
+    marginLeft: -8,
+    borderRadius: 8,
+    backgroundColor: '#2563EB',
+    borderWidth: 2,
+    borderColor: '#fff',
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 3,
+    shadowOffset: { width: 0, height: 1 },
+    zIndex: 2,
+  },
+  voiceTimeText: { marginTop: 4, color: "#6B7280", fontSize: 12, fontWeight: "600" },
 });
