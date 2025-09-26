@@ -6,8 +6,8 @@ import {
   ScrollView,
   TouchableOpacity,
   TextInput,
-  useColorScheme,
   Alert,
+  Platform,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import * as ImagePicker from "expo-image-picker";
@@ -15,17 +15,21 @@ import * as Location from "expo-location";
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
 import { router } from "expo-router";
+import Constants from "expo-constants";
+import { useAppTheme } from "../../theme/ThemeProvider";
 
 type CategoryKey = "pothole" | "garbage" | "streetlight";
 
 export default function ReportIssueScreen() {
-  const scheme = useColorScheme();
-  const isDark = scheme === "dark";
+  const { isDark } = useAppTheme();
 
   const [media, setMedia] = useState<string | null>(null);
   const [address, setAddress] = useState<string>("Detecting location…");
+  const [lat, setLat] = useState<number | null>(null);
+  const [lng, setLng] = useState<number | null>(null);
   const [category, setCategory] = useState<CategoryKey>("garbage");
   const [description, setDescription] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -35,7 +39,9 @@ export default function ReportIssueScreen() {
           setAddress("Location permission denied");
           return;
         }
-        const loc = await Location.getCurrentPositionAsync({});
+  const loc = await Location.getCurrentPositionAsync({});
+  setLat(loc.coords.latitude);
+  setLng(loc.coords.longitude);
         const geo = await Location.reverseGeocodeAsync({
           latitude: loc.coords.latitude,
           longitude: loc.coords.longitude,
@@ -61,10 +67,13 @@ export default function ReportIssueScreen() {
       Alert.alert("Permission required", "Please allow camera access to take a photo.");
       return;
     }
-    // Prefer the new API (MediaType) when available at runtime, fallback to deprecated MediaTypeOptions
-    const preferredImagesType = (ImagePicker as any).MediaType?.Images ?? ImagePicker.MediaTypeOptions.Images;
+    // Prefer the new API (MediaType) with array; fallback only if not available at runtime
+    const hasNewApi = !!(ImagePicker as any).MediaType;
+    const mediaTypes = hasNewApi
+      ? [((ImagePicker as any).MediaType.Images as any)]
+      : (ImagePicker as any).MediaTypeOptions.Images;
     const res = await ImagePicker.launchCameraAsync({
-      mediaTypes: preferredImagesType as any,
+      mediaTypes: mediaTypes as any,
       allowsEditing: true,
       quality: 0.8,
       cameraType: ImagePicker.CameraType.back,
@@ -88,7 +97,7 @@ export default function ReportIssueScreen() {
               colors={["#47C3FF", "#6C8CF5", "#E25C67"]}
               start={{ x: 0, y: 0 }}
               end={{ x: 1, y: 1 }}
-              style={StyleSheet.absoluteFill}
+              style={[StyleSheet.absoluteFill, styles.pillGradient]}
             />
           ) : null}
           <Ionicons
@@ -105,15 +114,87 @@ export default function ReportIssueScreen() {
 
   const canSubmit = useMemo(() => description.trim().length >= 10, [description]);
 
-  const onSubmit = useCallback(() => {
+  const apiCandidates = useMemo(() => {
+    const list: string[] = [];
+    const publicEnv = (typeof process !== "undefined" && (process as any)?.env?.EXPO_PUBLIC_API_URL)
+      ? (process as any).env.EXPO_PUBLIC_API_URL as string
+      : undefined;
+    if (publicEnv) return [publicEnv.replace(/\/$/, "")];
+    const hostUri: string | undefined = (Constants as any)?.expoConfig?.hostUri || (Constants as any)?.debuggerHost;
+    const host = typeof hostUri === "string" ? hostUri.split(":" )[0] : undefined;
+    const isIPv4 = host ? /^\d+\.\d+\.\d+\.\d+$/.test(host) : false;
+    if (Platform.OS === "android") {
+      list.push("http://10.0.2.2:8000");
+      if (isIPv4) list.push(`http://${host}:8000`);
+      list.push("http://127.0.0.1:8000");
+    } else {
+      if (isIPv4) list.push(`http://${host}:8000`);
+      list.push("http://127.0.0.1:8000");
+    }
+    return list;
+  }, []);
+
+  const onSubmit = useCallback(async () => {
     if (!canSubmit) {
       Alert.alert("Add more details", "Please provide at least 10 characters.");
       return;
     }
-    console.log("Submitting report", { media, address, category, description });
-    Alert.alert("Submitted", "Your report has been submitted.");
-    setDescription("");
-  }, [canSubmit, media, address, category, description]);
+    try {
+      setSubmitting(true);
+      const useMultipart = !!media; // if we have a captured image, upload it
+      let body: any;
+      let headers: Record<string, string> | undefined = undefined;
+      if (useMultipart) {
+        const form = new FormData();
+        form.append("name", "guest"); // TODO: use real username when auth is ready
+        form.append("title", category);
+        form.append("body", description);
+        form.append("location", address);
+        if (lat != null) (form as any).append("lat", String(lat));
+        if (lng != null) (form as any).append("lng", String(lng));
+        (form as any).append("image", {
+          uri: media,
+          name: "report.jpg",
+          type: "image/jpeg",
+        } as any);
+        body = form;
+        // Do NOT set Content-Type; let fetch set proper multipart boundary
+      } else {
+        body = JSON.stringify({
+          name: "guest",
+          title: category,
+          body: description,
+          location: address,
+          coords: lat != null && lng != null ? { lat, lng } : undefined,
+          image_url: "",
+        });
+        headers = { "Content-Type": "application/json" };
+      }
+      let lastErr: any = null;
+      for (const base of apiCandidates) {
+        try {
+          const res = await fetch(`${base}/api/reports/`, {
+            method: "POST",
+            headers,
+            body,
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          await res.json();
+          Alert.alert("Submitted", "Your report has been submitted.");
+          setDescription("");
+          router.replace("/(tabs)");
+          return;
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      throw lastErr ?? new Error("Failed to submit");
+    } catch (e: any) {
+      Alert.alert("Failed", e?.message ?? "Could not submit your report");
+    } finally {
+      setSubmitting(false);
+    }
+  }, [canSubmit, apiCandidates, category, description, address, media, lat, lng]);
 
   return (
     <ScrollView style={[styles.container, isDark && { backgroundColor: "#0B0B0D" }]} contentContainerStyle={{ paddingBottom: 32 }}>
@@ -126,16 +207,23 @@ export default function ReportIssueScreen() {
       </View>
 
       <View style={[styles.card, isDark && styles.cardDark]}>
-        <TouchableOpacity style={styles.uploadBox} activeOpacity={0.8} onPress={capturePhoto}>
-          {media ? (
-            <Image source={{ uri: media }} style={styles.preview} contentFit="cover" />
-          ) : (
-            <>
-              <Ionicons name="camera-outline" size={26} color="#6B7280" />
-              <Text style={styles.uploadText}>Tap to Capture Photo</Text>
-            </>
-          )}
-        </TouchableOpacity>
+        <LinearGradient
+          colors={isDark ? ["#12161C", "#12161C"] : ["#FFFFFF", "#F7FAFF"]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.uploadOuter}
+        >
+          <TouchableOpacity style={styles.uploadBox} activeOpacity={0.85} onPress={capturePhoto}>
+            {media ? (
+              <Image source={{ uri: media }} style={styles.preview} contentFit="cover" />
+            ) : (
+              <>
+                <Ionicons name="camera-outline" size={26} color="#6B7280" />
+                <Text style={styles.uploadText}>Tap to Capture Photo</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </LinearGradient>
       </View>
 
       <View style={[styles.card, isDark && styles.cardDark]}>
@@ -174,14 +262,14 @@ export default function ReportIssueScreen() {
         />
       </View>
 
-      <TouchableOpacity onPress={onSubmit} activeOpacity={0.85} disabled={!canSubmit} style={{ marginHorizontal: 20 }}>
+      <TouchableOpacity onPress={onSubmit} activeOpacity={0.9} disabled={!canSubmit || submitting} style={{ marginHorizontal: 20 }}>
         <LinearGradient
-          colors={canSubmit ? ["#47C3FF", "#6C8CF5", "#E25C67"] : ["#9CA3AF", "#9CA3AF"]}
+          colors={canSubmit && !submitting ? ["#47C3FF", "#6C8CF5", "#E25C67"] : ["#9CA3AF", "#9CA3AF"]}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
           style={styles.submit}
         >
-          <Text style={styles.submitText}>Submit Report</Text>
+          <Text style={styles.submitText}>{submitting ? "Submitting..." : "Submit Report"}</Text>
         </LinearGradient>
       </TouchableOpacity>
     </ScrollView>
@@ -204,29 +292,34 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
     marginHorizontal: 16,
     marginTop: 16,
-    borderRadius: 16,
+    borderRadius: 18,
     padding: 14,
-    shadowColor: "#000",
-    shadowOpacity: 0.06,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
+    shadowColor: "#0B1220",
+    shadowOpacity: 0.05,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 8 },
     borderWidth: 1,
-    borderColor: "#E5E7EB",
+    borderColor: "#E8ECF3",
   },
   cardDark: { backgroundColor: "#14161A", borderColor: "#1F2430" },
+  uploadOuter: {
+    borderRadius: 18,
+    padding: 10,
+  },
   uploadBox: {
     height: 160,
     borderWidth: 1,
     borderStyle: "dashed",
-    borderRadius: 14,
-    borderColor: "#D1D5DB",
+    borderRadius: 16,
+    borderColor: "#D6DBE6",
+    backgroundColor: "#FBFCFE",
     alignItems: "center",
     justifyContent: "center",
     gap: 8,
     overflow: "hidden",
   },
   preview: { width: "100%", height: "100%" },
-  uploadText: { color: "#6B7280", fontWeight: "600" },
+  uploadText: { color: "#6B7280", fontWeight: "700" },
   sectionTitle: { fontSize: 16, fontWeight: "700", color: "#111827", marginBottom: 8 },
   row: { flexDirection: "row", gap: 8, alignItems: "flex-start" },
   hint: { color: "#6B7280", marginBottom: 2 },
@@ -238,25 +331,27 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     paddingVertical: 12,
     paddingHorizontal: 14,
-    backgroundColor: "#F1F5F9",
+    backgroundColor: "#F7F9FC",
     borderWidth: 1,
-    borderColor: "#E5E7EB",
+    borderColor: "#E6EAF2",
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
+    overflow: "hidden", // ensure gradient keeps pill shape
   },
+  pillGradient: { borderRadius: 16 },
   pillSelected: { borderColor: "transparent" },
   pillText: { fontWeight: "700", color: "#374151" },
   input: {
     marginTop: 4,
     borderWidth: 1,
-    borderColor: "#E5E7EB",
-    borderRadius: 12,
+    borderColor: "#E8ECF3",
+    borderRadius: 14,
     padding: 12,
     minHeight: 120,
     textAlignVertical: "top",
-    backgroundColor: "#F9FAFB",
+    backgroundColor: "#FBFCFE",
   },
-  submit: { marginTop: 16, borderRadius: 24, paddingVertical: 14, alignItems: "center", justifyContent: "center" },
+  submit: { marginTop: 16, borderRadius: 28, paddingVertical: 16, alignItems: "center", justifyContent: "center" },
   submitText: { color: "#fff", fontWeight: "800" },
 });

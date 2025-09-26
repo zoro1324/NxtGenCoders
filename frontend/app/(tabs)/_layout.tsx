@@ -1,13 +1,24 @@
 import { Tabs } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import { useColorScheme } from "react-native";
+import { useAppTheme } from "../../theme/ThemeProvider";
 
 export default function TabsLayout() {
-  const scheme = useColorScheme();
-  const tint = scheme === "dark" ? "#A5D6FF" : "#007AFF";
+  const { isDark } = useAppTheme();
+  const active = isDark ? "#A5D6FF" : "#007AFF";
+  const inactive = isDark ? "#9BA7B4" : "#6B7280";
+  const bg = isDark ? "#0B0B0D" : "#FFFFFF";
+  const border = isDark ? "#1F2430" : "#E5E7EB";
 
   return (
-    <Tabs screenOptions={{ headerShown: false, tabBarActiveTintColor: tint }}>
+    <Tabs
+      screenOptions={{
+        headerShown: false,
+        tabBarActiveTintColor: active,
+        tabBarInactiveTintColor: inactive,
+        tabBarStyle: { backgroundColor: bg, borderTopColor: border, height: 58 },
+        tabBarLabelStyle: { fontSize: 11, fontWeight: "700" },
+      }}
+    >
       <Tabs.Screen
         name="index"
         options={{

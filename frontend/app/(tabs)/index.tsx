@@ -1,39 +1,49 @@
 import { Image } from "expo-image";
 import { Link } from "expo-router";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ScrollView,
+  RefreshControl,
   StyleSheet,
   Text,
   View,
   TouchableOpacity,
   useColorScheme,
   Platform,
+  Linking,
+  Alert,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import Constants from "expo-constants";
+import { LinearGradient } from "expo-linear-gradient";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { useAppTheme } from "../../theme/ThemeProvider";
 
 type Report = {
   id: number;
   name: string;
   time?: string;
   title: string;
+  location?: string;
+  photo?: string;
   image_url?: string;
   body: string;
   comments: number;
   likes: number;
   shares: number;
   created_at?: string;
+  coords?: { lat: number; lng: number };
 };
 
 export default function HomeScreen() {
-  const scheme = useColorScheme();
-  const isDark = scheme === "dark";
+  const { isDark } = useAppTheme();
+  const insets = useSafeAreaInsets();
   const [reports, setReports] = useState<Report[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [usedBase, setUsedBase] = useState<string | null>(null);
+  // removed unused usedBase to avoid lint warning
   const [triedBases, setTriedBases] = useState<string[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
 
   const apiCandidates = useMemo(() => {
     const list: string[] = [];
@@ -58,51 +68,56 @@ export default function HomeScreen() {
     return list;
   }, []);
 
-  useEffect(() => {
+  const fetchReports = useCallback(async (showSpinner: boolean) => {
     let cancelled = false;
-    async function load() {
-      try {
-        setLoading(true);
-        setError(null);
-        let lastErr: any = null;
-        const attempts: string[] = [];
-        for (const base of apiCandidates) {
-          attempts.push(base);
-          try {
-            const url = `${base}/api/reports/`;
-            const res = await fetch(url);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json();
-            const items: Report[] = (data.results ?? data) as Report[];
-            if (!cancelled) {
-              setReports(items);
-              setError(null);
-              setUsedBase(base);
-              setTriedBases(attempts);
-            }
-            return; // success
-          } catch (e) {
-            lastErr = e;
-            // try next candidate
+    try {
+      if (showSpinner) setLoading(true);
+      setError(null);
+      let lastErr: any = null;
+      const attempts: string[] = [];
+      for (const base of apiCandidates) {
+        attempts.push(base);
+        try {
+          const url = `${base}/api/reports/`;
+          const res = await fetch(url);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          const items: Report[] = (data.results ?? data) as Report[];
+          if (!cancelled) {
+            setReports(items);
+            setError(null);
+            setTriedBases(attempts);
           }
+          return; // success
+        } catch (e) {
+          lastErr = e;
+          // try next candidate
         }
-        // if all candidates failed
-        if (!cancelled) {
-          setError(lastErr?.message ?? "Failed to load");
-          setUsedBase(null);
-          setTriedBases(attempts);
-        }
-      } catch (e: any) {
-        if (!cancelled) setError(e?.message ?? "Failed to load");
-      } finally {
-        if (!cancelled) setLoading(false);
       }
+      // if all candidates failed
+      if (!cancelled) {
+        setError(lastErr?.message ?? "Failed to load");
+        setTriedBases(attempts);
+      }
+    } catch (e: any) {
+      if (!cancelled) setError(e?.message ?? "Failed to load");
+    } finally {
+      if (showSpinner) setLoading(false);
     }
-    load();
-    return () => {
-      cancelled = true;
-    };
   }, [apiCandidates]);
+
+  useEffect(() => {
+    fetchReports(true);
+  }, [fetchReports]);
+
+  const onRefresh = useCallback(async () => {
+    try {
+      setRefreshing(true);
+      await fetchReports(false);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [fetchReports]);
 
   function formatTime(iso?: string) {
     if (!iso) return "";
@@ -125,12 +140,41 @@ export default function HomeScreen() {
     }
   }
 
+  const openLocation = useCallback((r: Report) => {
+    try {
+      const hasCoords = !!(r.coords && typeof r.coords.lat === "number" && typeof r.coords.lng === "number");
+      const query = hasCoords
+        ? `${r.coords!.lat},${r.coords!.lng}`
+        : encodeURIComponent(r.location || r.title || "Location");
+      const url = Platform.select({
+        ios: `http://maps.apple.com/?q=${query}`,
+        android: `https://www.google.com/maps/search/?api=1&query=${query}`,
+        default: `https://www.google.com/maps/search/?api=1&query=${query}`,
+      });
+      if (!url) throw new Error("Unsupported platform");
+      Linking.openURL(url);
+    } catch (e: any) {
+      Alert.alert("Unable to open maps", e?.message ?? "Try again later.");
+    }
+  }, []);
+
   return (
-    <ScrollView style={[styles.container, isDark && { backgroundColor: "#0B0B0D" }]}>
-      <View style={styles.header}>
+    <ScrollView
+      style={[styles.container, isDark && { backgroundColor: "#0B0B0D" }]}
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#0A66C2" colors={["#0A66C2"]} />}
+    > 
+      <LinearGradient
+        colors={isDark ? ["#0E141B", "#0E141B"] : ["#EAF7FF", "#ECF2FF"]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={[
+          styles.header,
+          // Add top padding for status bar/safe area to avoid overlap
+          { paddingTop: Math.max(insets.top, 12) + 8 },
+        ]}
+      >
         <View>
           <Text style={[styles.appTitle, isDark && { color: "#A5D6FF" }]}>Smart City</Text>
-          <Text style={[styles.appSubtitle, isDark && { color: "#E5F3FF" }]}>Dashboard</Text>
         </View>
         <TouchableOpacity style={styles.avatarWrap} activeOpacity={0.8}>
           <Image
@@ -140,20 +184,34 @@ export default function HomeScreen() {
             style={styles.avatar}
           />
         </TouchableOpacity>
-      </View>
+      </LinearGradient>
 
       <View style={styles.actions}>
         <Link href="/(tabs)/reports" asChild>
-          <TouchableOpacity style={[styles.cta, styles.ctaPrimary]}>
-            <Ionicons name="document-text-outline" size={22} color="#fff" />
-            <Text style={styles.ctaText}>My Reports</Text>
+          <TouchableOpacity activeOpacity={0.9}>
+            <LinearGradient
+              colors={["#0BC5EA", "#2563EB"]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.cta}
+            >
+              <Ionicons style={styles.ctaIconLeft} name="document-text-outline" size={22} color="#fff" />
+              <Text style={[styles.ctaText, styles.ctaTextCenter]}>My Reports</Text>
+            </LinearGradient>
           </TouchableOpacity>
         </Link>
 
         <Link href="/(tabs)/issues" asChild>
-          <TouchableOpacity style={[styles.cta, styles.ctaSecondary]}>
-            <Ionicons name="megaphone-outline" size={22} color="#fff" />
-            <Text style={styles.ctaText}>Report an Issue</Text>
+          <TouchableOpacity activeOpacity={0.9}>
+            <LinearGradient
+              colors={["#0BC5EA", "#2563EB"]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.cta}
+            >
+              <Ionicons style={styles.ctaIconLeft} name="megaphone-outline" size={22} color="#fff" />
+              <Text style={[styles.ctaText, styles.ctaTextCenter]}>Report an Issue</Text>
+            </LinearGradient>
           </TouchableOpacity>
         </Link>
       </View>
@@ -188,22 +246,26 @@ export default function HomeScreen() {
             </View>
 
             <Text style={[styles.cardTitle, isDark && { color: "#E6EAF2" }]}>{r.title}</Text>
-            {!!r.image_url && <Image source={{ uri: r.image_url }} style={styles.cardImage} contentFit="cover" />}
+            {!!(r.photo || r.image_url) && <Image source={{ uri: r.photo || r.image_url! }} style={styles.cardImage} contentFit="cover" />}
             {!!r.body && <Text style={[styles.cardBody, isDark && { color: "#C9D2DC" }]}>{r.body}</Text>}
 
             <View style={styles.cardFooter}>
-              <View style={styles.footerItem}>
-                <Ionicons name="chatbubble-ellipses-outline" size={18} color="#6B7280" />
-                <Text style={styles.footerText}>{r.comments ?? 0}</Text>
-              </View>
-              <View style={styles.footerItem}>
+              <TouchableOpacity style={styles.footerItem} activeOpacity={0.7}>
                 <Ionicons name="thumbs-up-outline" size={18} color="#6B7280" />
                 <Text style={styles.footerText}>{r.likes ?? 0}</Text>
-              </View>
-              <View style={styles.footerItem}>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.footerItem} activeOpacity={0.7}>
+                <Ionicons name="chatbubble-ellipses-outline" size={18} color="#6B7280" />
+                <Text style={styles.footerText}>{r.comments ?? 0}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.footerItem} activeOpacity={0.7}>
                 <Ionicons name="arrow-redo-outline" size={18} color="#6B7280" />
                 <Text style={styles.footerText}>{r.shares ?? 0}</Text>
-              </View>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.footerItem} onPress={() => openLocation(r)} activeOpacity={0.7}>
+                <Ionicons name="location-outline" size={18} color="#6B7280" />
+                <Text style={styles.footerText}>View</Text>
+              </TouchableOpacity>
             </View>
           </View>
         ))}
@@ -215,12 +277,13 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: "#F6F8FB" },
   header: {
-    paddingTop: 24,
     paddingHorizontal: 20,
     paddingBottom: 12,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    borderBottomWidth: 1,
+    borderBottomColor: "#DDE3F1",
   },
   appTitle: { fontSize: 20, fontWeight: "800", color: "#0A66C2" },
   appSubtitle: { fontSize: 18, fontWeight: "700", color: "#2B7FFF" },
@@ -233,22 +296,24 @@ const styles = StyleSheet.create({
     borderColor: "#E5E7EB",
   },
   avatar: { width: "100%", height: "100%" },
-  actions: { paddingHorizontal: 20, gap: 12 },
+  actions: { paddingHorizontal: 20, gap: 12, marginTop: 12 },
   cta: {
-    borderRadius: 12,
+    borderRadius: 14,
     paddingVertical: 16,
     paddingHorizontal: 18,
-    flexDirection: "row",
+    // Center label; icon is absolutely positioned on the left
     alignItems: "center",
-    gap: 10,
+    justifyContent: "center",
+    position: "relative",
     shadowColor: "#000",
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
   },
-  ctaPrimary: { backgroundColor: "#0EA5E9" },
-  ctaSecondary: { backgroundColor: "#2563EB" },
+  ctaIconLeft: { position: "absolute", left: 18 },
   ctaText: { color: "#fff", fontWeight: "700", fontSize: 16 },
+  ctaTextCenter: { textAlign: "center", width: "100%" },
   sectionTitle: {
     paddingHorizontal: 20,
     marginTop: 18,

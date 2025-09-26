@@ -4,6 +4,8 @@ from .models import Report
 
 class ReportSerializer(serializers.ModelSerializer):
     time = serializers.SerializerMethodField(read_only=True)
+    photo = serializers.SerializerMethodField(read_only=True)
+    coords = serializers.SerializerMethodField(read_only=True)
 
     class Meta:
         model = Report
@@ -12,6 +14,9 @@ class ReportSerializer(serializers.ModelSerializer):
             "name",
             "title",
             "body",
+            "location",
+            "photo",
+            "coords",
             "image_url",
             "comments",
             "likes",
@@ -42,3 +47,40 @@ class ReportSerializer(serializers.ModelSerializer):
         if d < 7:
             return f"{d}d ago"
         return obj.created_at.date().isoformat()
+
+    def _absolute_url(self, url: str | None) -> str | None:
+        if not url:
+            return None
+        if url.startswith("http://") or url.startswith("https://"):
+            return url
+        request = self.context.get("request") if hasattr(self, 'context') else None
+        if request is None:
+            # Best-effort: ensure it starts with a slash
+            return url if url.startswith("/") else f"/{url}"
+        if url.startswith("/"):
+            return request.build_absolute_uri(url)
+        return request.build_absolute_uri(f"/{url}")
+
+    def get_photo(self, obj: Report) -> str | None:
+        # Prefer uploaded image if present, else external URL
+        try:
+            if getattr(obj, 'image', None) and obj.image:
+                return self._absolute_url(obj.image.url)
+        except Exception:
+            pass
+        return self._absolute_url(obj.image_url)
+
+    def get_coords(self, obj: Report):
+        c = getattr(obj, 'coords', None)
+        if not c:
+            return None
+        # Return as {lat, lng}
+        try:
+            return {"lat": c.y, "lng": c.x}
+        except Exception:
+            return None
+
+    def to_representation(self, instance: Report):
+        data = super().to_representation(instance)
+        data["image_url"] = self._absolute_url(data.get("image_url"))
+        return data
