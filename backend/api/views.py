@@ -7,10 +7,17 @@ from rest_framework import status
 from rest_framework.pagination import PageNumberPagination
 from django.contrib.gis.geos import Point
 import json
-from django.contrib.auth import authenticate
+from django.contrib.auth import authenticate, get_user_model
+from django.db.models import Q
 from rest_framework.authtoken.models import Token
 from .models import Report, Civic
 from .serializers import ReportSerializer, SignupSerializer
+
+
+@api_view(["GET"])
+def health(request):
+	"""Lightweight health check for connectivity tests."""
+	return Response({"status": "ok"})
 
 
 @api_view(["GET", "POST"])
@@ -170,11 +177,19 @@ def signup(request):
 
 @api_view(["POST"])
 def login(request):
-	username = request.data.get("username")
-	password = request.data.get("password")
-	if not username or not password:
-		return Response({"detail": "Username and password required"}, status=status.HTTP_400_BAD_REQUEST)
-	user = authenticate(request, username=username, password=password)
+	"""Authenticate by username OR email + password.
+	Request JSON: { "username": "user-or-email", "password": "..." }
+	"""
+	identifier = (request.data.get("username") or request.data.get("email") or "").strip()
+	password = (request.data.get("password") or "").strip()
+	if not identifier or not password:
+		return Response({"detail": "Username/email and password required"}, status=status.HTTP_400_BAD_REQUEST)
+
+	# Resolve username if an email was provided (or case-insensitive username)
+	User = get_user_model()
+	cand = User.objects.filter(Q(username__iexact=identifier) | Q(email__iexact=identifier)).first()
+	resolved_username = cand.username if cand else identifier
+	user = authenticate(request, username=resolved_username, password=password)
 	if not user:
 		return Response({"detail": "Invalid credentials"}, status=status.HTTP_400_BAD_REQUEST)
 	token, _ = Token.objects.get_or_create(user=user)

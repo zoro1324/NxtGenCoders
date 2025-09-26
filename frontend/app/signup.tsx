@@ -67,8 +67,11 @@ export default function SignupScreen() {
       if (password !== confirm) { Alert.alert('Password', 'Passwords do not match'); return; }
       setLoading(true);
       let lastErr: any = null;
+      const attempted: string[] = [];
+      let gotServerResponse = false; // track if any base returned an HTTP response (even 4xx)
       for (const base of apiCandidates) {
         try {
+          attempted.push(base);
           const hasImage = !!photo;
           let res: Response;
           if (hasImage) {
@@ -92,10 +95,25 @@ export default function SignupScreen() {
             if (coords) { body.lat = coords.lat; body.lng = coords.lng; }
             res = await fetch(`${base}/api/auth/signup/`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
           }
+          // We reached the server; capture that fact so we don't mask server errors with later network failures
+          gotServerResponse = true;
           if (!res.ok) {
             const data = await res.json().catch(() => ({}));
-            const msg = typeof data === "object" && data ? JSON.stringify(data) : res.statusText;
-            throw new Error(msg);
+            // Format common DRF error shapes nicely
+            let msg = res.statusText;
+            if (data && typeof data === 'object') {
+              try {
+                const parts: string[] = [];
+                for (const [k, v] of Object.entries<any>(data)) {
+                  if (Array.isArray(v)) parts.push(`${k}: ${v.join(', ')}`);
+                  else if (typeof v === 'string') parts.push(`${k}: ${v}`);
+                  else parts.push(`${k}: ${JSON.stringify(v)}`);
+                }
+                if (parts.length) msg = parts.join('\n');
+              } catch {}
+            }
+            // Stop trying other bases; we got a definitive answer from the server
+            throw new Error(msg || 'Signup failed');
           }
           // success
           const data = await res.json();
@@ -105,9 +123,12 @@ export default function SignupScreen() {
           return;
         } catch (e) {
           lastErr = e;
+          if (gotServerResponse) break; // don't try other bases; preserve server error
         }
       }
-      throw lastErr ?? new Error("Signup failed");
+      if (gotServerResponse && lastErr) throw lastErr;
+      const msg = (lastErr && (lastErr as any).message) || 'Network request failed';
+      throw new Error(`${msg}\n\nTried: ${attempted.join('\n- ')}`);
     } catch (e: any) {
       Alert.alert("Signup failed", e?.message ?? "Unknown error");
     } finally {

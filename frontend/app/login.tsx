@@ -26,8 +26,10 @@ export default function LoginScreen() {
       if (!username || !password) return Alert.alert("Missing", "Fill both fields");
       setLoading(true);
       let lastErr: any = null;
+      const attempted: string[] = [];
       for (const base of api) {
         try {
+          attempted.push(base);
           const res = await fetch(`${base}/api/auth/login/`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password }) });
           const data = await res.json();
           if (!res.ok) throw new Error(typeof data === 'object' ? JSON.stringify(data) : res.statusText);
@@ -36,17 +38,23 @@ export default function LoginScreen() {
           return;
         } catch (e) { lastErr = e; }
       }
-      throw lastErr ?? new Error("Login failed");
-    } catch (e: any) { Alert.alert("Login failed", e?.message ?? ""); } finally { setLoading(false); }
-  }, [username, password, api]);
+      const msg = lastErr?.message || String(lastErr) || "Login failed";
+      throw new Error(`${msg}\n\nTried: ${attempted.join("\n- ")}`);
+    } catch (e: any) {
+      Alert.alert("Login failed", e?.message ?? "");
+    } finally { setLoading(false); }
+  }, [username, password, api, router]);
 
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Log In</Text>
-      <TextInput style={styles.input} placeholder="Username" autoCapitalize="none" value={username} onChangeText={setUsername} />
+  <TextInput style={styles.input} placeholder="Username or Email" autoCapitalize="none" value={username} onChangeText={setUsername} />
       <TextInput style={styles.input} placeholder="Password" secureTextEntry value={password} onChangeText={setPassword} />
       <TouchableOpacity style={styles.btn} disabled={loading} onPress={submit}>
         {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnText}>Log In</Text>}
+      </TouchableOpacity>
+      <TouchableOpacity onPress={() => router.push('/signup')} style={{ marginTop: 10 }}>
+        <Text style={{ color: '#0A66C2', fontWeight: '700' }}>Don&apos;t have an account? Sign up</Text>
       </TouchableOpacity>
     </View>
   );
