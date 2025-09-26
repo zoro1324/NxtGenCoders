@@ -61,8 +61,10 @@ export default function ReportIssueScreen() {
       Alert.alert("Permission required", "Please allow camera access to take a photo.");
       return;
     }
+    // Prefer the new API (MediaType) when available at runtime, fallback to deprecated MediaTypeOptions
+    const preferredImagesType = (ImagePicker as any).MediaType?.Images ?? ImagePicker.MediaTypeOptions.Images;
     const res = await ImagePicker.launchCameraAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: preferredImagesType as any,
       allowsEditing: true,
       quality: 0.8,
       cameraType: ImagePicker.CameraType.back,

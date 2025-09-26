@@ -1,6 +1,6 @@
 import { Image } from "expo-image";
 import { Link } from "expo-router";
-import React from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   ScrollView,
   StyleSheet,
@@ -8,54 +8,122 @@ import {
   View,
   TouchableOpacity,
   useColorScheme,
+  Platform,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import Constants from "expo-constants";
 
-const demoReports = [
-  {
-    id: "1",
-    name: "Alex Chen",
-    time: "2 hours ago",
-    title: "Pothole on Main Street, near City Hall",
-    image:
-      "https://images.unsplash.com/photo-1519682337058-a94d519337bc?q=80&w=1600&auto=format&fit=crop",
-    body:
-      "A large and dangerous pothole has developed on Main Street, just east of the City Hall entrance. It's causing disruption to traffic flow.",
-    comments: 5,
-    likes: 28,
-    shares: 3,
-  },
-  {
-    id: "2",
-    name: "Maria Rodriguez",
-    time: "5 hours ago",
-    title: "Broken street light on Oak Avenue",
-    image:
-      "https://images.unsplash.com/photo-1603052875138-981d558d4f25?q=80&w=1600&auto=format&fit=crop",
-    body:
-      "The street light on Oak Avenue has been out for three nights. The area is very dark and feels unsafe.",
-    comments: 5,
-    likes: 15,
-    shares: 1,
-  },
-  {
-    id: "3",
-    name: "David Lee",
-    time: "Yesterday",
-    title: "Overflowing public trash can at Central Park",
-    image:
-      "https://images.unsplash.com/photo-1514890547357-a9ee288728e0?q=80&w=1600&auto=format&fit=crop",
-    body:
-      "The trash can near the playground at Central Park is overflowing. It's becoming an eyesore and a health concern.",
-    comments: 5,
-    likes: 42,
-    shares: 5,
-  },
-];
+type Report = {
+  id: number;
+  name: string;
+  time?: string;
+  title: string;
+  image_url?: string;
+  body: string;
+  comments: number;
+  likes: number;
+  shares: number;
+  created_at?: string;
+};
 
 export default function HomeScreen() {
   const scheme = useColorScheme();
   const isDark = scheme === "dark";
+  const [reports, setReports] = useState<Report[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [usedBase, setUsedBase] = useState<string | null>(null);
+  const [triedBases, setTriedBases] = useState<string[]>([]);
+
+  const apiCandidates = useMemo(() => {
+    const list: string[] = [];
+    const publicEnv = (typeof process !== "undefined" && (process as any)?.env?.EXPO_PUBLIC_API_URL)
+      ? (process as any).env.EXPO_PUBLIC_API_URL as string
+      : undefined;
+    if (publicEnv) return [publicEnv.replace(/\/$/, "")];
+
+    const hostUri: string | undefined = (Constants as any)?.expoConfig?.hostUri || (Constants as any)?.debuggerHost;
+    const host = typeof hostUri === "string" ? hostUri.split(":" )[0] : undefined;
+    const isIPv4 = host ? /^\d+\.\d+\.\d+\.\d+$/.test(host) : false;
+
+    if (Platform.OS === "android") {
+      // Prefer emulator alias first
+      list.push("http://10.0.2.2:8000");
+      if (isIPv4) list.push(`http://${host}:8000`);
+      list.push("http://127.0.0.1:8000");
+    } else {
+      if (isIPv4) list.push(`http://${host}:8000`);
+      list.push("http://127.0.0.1:8000");
+    }
+    return list;
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        setLoading(true);
+        setError(null);
+        let lastErr: any = null;
+        const attempts: string[] = [];
+        for (const base of apiCandidates) {
+          attempts.push(base);
+          try {
+            const url = `${base}/api/reports/`;
+            const res = await fetch(url);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            const items: Report[] = (data.results ?? data) as Report[];
+            if (!cancelled) {
+              setReports(items);
+              setError(null);
+              setUsedBase(base);
+              setTriedBases(attempts);
+            }
+            return; // success
+          } catch (e) {
+            lastErr = e;
+            // try next candidate
+          }
+        }
+        // if all candidates failed
+        if (!cancelled) {
+          setError(lastErr?.message ?? "Failed to load");
+          setUsedBase(null);
+          setTriedBases(attempts);
+        }
+      } catch (e: any) {
+        if (!cancelled) setError(e?.message ?? "Failed to load");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiCandidates]);
+
+  function formatTime(iso?: string) {
+    if (!iso) return "";
+    try {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return "";
+      const now = new Date();
+      const diffMs = now.getTime() - d.getTime();
+      const sec = Math.max(1, Math.floor(diffMs / 1000));
+      if (sec < 60) return `${sec}s ago`;
+      const min = Math.floor(sec / 60);
+      if (min < 60) return `${min}m ago`;
+      const hr = Math.floor(min / 60);
+      if (hr < 24) return `${hr}h ago`;
+      const day = Math.floor(hr / 24);
+      if (day < 7) return `${day}d ago`;
+      return d.toLocaleDateString();
+    } catch {
+      return "";
+    }
+  }
 
   return (
     <ScrollView style={[styles.container, isDark && { backgroundColor: "#0B0B0D" }]}>
@@ -93,7 +161,19 @@ export default function HomeScreen() {
       <Text style={[styles.sectionTitle, isDark && { color: "#E6EAF2" }]}>Community Reports</Text>
 
       <View style={styles.list}>
-        {demoReports.map((r) => (
+        {loading && (
+          <Text style={{ paddingHorizontal: 16, color: isDark ? "#C9D2DC" : "#6B7280" }}>Loading…</Text>
+        )}
+        {!!error && !loading && (
+          <Text style={{ paddingHorizontal: 16, color: "#DC2626" }}>
+            Error: {error}{"\n"}
+            {triedBases.length > 0 ? `Tried: ${triedBases.join(', ')}` : ''}
+          </Text>
+        )}
+        {!loading && !error && reports.length === 0 && (
+          <Text style={{ paddingHorizontal: 16, color: isDark ? "#C9D2DC" : "#6B7280" }}>No reports yet.</Text>
+        )}
+        {!loading && !error && reports.map((r) => (
           <View key={r.id} style={[styles.card, isDark && { backgroundColor: "#14161A", borderColor: "#1F2430" }]}>
             <View style={styles.cardHeader}>
               <Image
@@ -102,27 +182,27 @@ export default function HomeScreen() {
               />
               <View style={{ flex: 1 }}>
                 <Text style={[styles.userName, isDark && { color: "#E6EAF2" }]}>{r.name}</Text>
-                <Text style={styles.timeText}>{r.time}</Text>
+                <Text style={styles.timeText}>{r.time ?? formatTime(r.created_at)}</Text>
               </View>
               <Ionicons name="ellipsis-horizontal" size={20} color={isDark ? "#9BA7B4" : "#6B7280"} />
             </View>
 
             <Text style={[styles.cardTitle, isDark && { color: "#E6EAF2" }]}>{r.title}</Text>
-            <Image source={{ uri: r.image }} style={styles.cardImage} contentFit="cover" />
-            <Text style={[styles.cardBody, isDark && { color: "#C9D2DC" }]}>{r.body}</Text>
+            {!!r.image_url && <Image source={{ uri: r.image_url }} style={styles.cardImage} contentFit="cover" />}
+            {!!r.body && <Text style={[styles.cardBody, isDark && { color: "#C9D2DC" }]}>{r.body}</Text>}
 
             <View style={styles.cardFooter}>
               <View style={styles.footerItem}>
                 <Ionicons name="chatbubble-ellipses-outline" size={18} color="#6B7280" />
-                <Text style={styles.footerText}>{r.comments}</Text>
+                <Text style={styles.footerText}>{r.comments ?? 0}</Text>
               </View>
               <View style={styles.footerItem}>
                 <Ionicons name="thumbs-up-outline" size={18} color="#6B7280" />
-                <Text style={styles.footerText}>{r.likes}</Text>
+                <Text style={styles.footerText}>{r.likes ?? 0}</Text>
               </View>
               <View style={styles.footerItem}>
                 <Ionicons name="arrow-redo-outline" size={18} color="#6B7280" />
-                <Text style={styles.footerText}>{r.shares}</Text>
+                <Text style={styles.footerText}>{r.shares ?? 0}</Text>
               </View>
             </View>
           </View>
